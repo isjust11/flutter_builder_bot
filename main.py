@@ -2,7 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, Application
 
 from builder import start_build_thread
 
@@ -15,29 +15,56 @@ logging.basicConfig(
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-ALLOWED_CHAT_IDS = [int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x.strip().isdigit()]
+ALLOWED_CHAT_IDS = [int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x.strip().lstrip("-").isdigit()]
+channel_id_env = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
+if channel_id_env.lstrip("-").isdigit():
+    ALLOWED_CHAT_IDS.append(int(channel_id_env))
 
 # Store user selections during the flow
 # Dictionary format: { chat_id: { 'project': '...', 'env': '...', 'platform': '...', 'version': '...' } }
 user_sessions = {}
 
-# Mock data mapping to .env
-# Trong thực tế, bạn sẽ parse .env để lấy động danh sách này
-PROJECTS = {
-    "Chợ Tốt": {
-        "path": os.getenv("PROJECT_CHOTOT_PATH", "D:\\develop\\projects\\chotot"),
-        "branch": os.getenv("PROJECT_CHOTOT_BRANCH", "main")
-    },
-    "Other App": {
-        "path": os.getenv("PROJECT_OTHER_PATH", "D:\\develop\\projects\\other"),
-        "branch": os.getenv("PROJECT_OTHER_BRANCH", "dev")
-    }
-}
+# Parse .env để lấy động danh sách project
+def load_projects():
+    projects = {}
+    for key, value in os.environ.items():
+        if key.startswith("PROJECT_") and key.endswith("_PATH"):
+            project_key = key[len("PROJECT_"):-len("_PATH")]
+            
+            branch_prefix = f"PROJECT_{project_key}_"
+            
+            # Tìm tất cả các branch liên quan đến project này
+            branch_keys = [k for k in os.environ.keys() if k.startswith(branch_prefix) and k.endswith("_BRANCH")]
+            
+            # Sắp xếp các branch: đảm bảo SUPPER_BRANCH luôn nằm cuối danh sách (để được build)
+            branch_keys.sort(key=lambda k: (1 if 'SUPPER' in k else 0, k))
+            
+            branches = []
+            for k in branch_keys:
+                val = os.environ[k]
+                if '|' in val:
+                    b_path, b_name = val.split('|', 1)
+                    branches.append({"path": b_path.strip(), "name": b_name.strip()})
+                else:
+                    branches.append({"path": None, "name": val.strip()})
+            
+            projects[project_key] = {
+                "path": value,
+                "branches": branches
+            }
+    return projects
 
-FLUTTER_VERSIONS = {
-    "3.24.0": os.getenv("FLUTTER_3_24_PATH", "flutter"),
-    "3.19.0": os.getenv("FLUTTER_3_19_PATH", "flutter")
-}
+PROJECTS = load_projects()
+
+def load_flutter_versions():
+    versions = {"Mặc định": "flutter"}
+    for key, val in os.environ.items():
+        if key.startswith("FLUTTER_") and key.endswith("_PATH"):
+            version_name = key.replace("FLUTTER_", "").replace("_PATH", "").replace("_", ".")
+            versions[version_name] = val
+    return versions
+
+FLUTTER_VERSIONS = load_flutter_versions()
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -46,20 +73,44 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("👋 Chào mừng bạn đến với Flutter Builder Bot! Gõ /build để bắt đầu.")
 
+async def getid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    thread_id = update.message.message_thread_id if update.message.message_thread_id else "None"
+    await update.message.reply_text(f"🆔 Chat ID: `{chat_id}`\n💬 Topic/Thread ID: `{thread_id}`", parse_mode="Markdown")
+
 async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in ALLOWED_CHAT_IDS:
+        logging.warning(f"Từ chối lệnh /build từ chat_id chưa được cấp phép: {chat_id}")
         return
         
-    user_sessions[chat_id] = {}
-    
     # BƯỚC 1: Chọn Project
     keyboard = []
     for proj_name in PROJECTS.keys():
         keyboard.append([InlineKeyboardButton(proj_name, callback_data=f"proj|{proj_name}")])
         
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Vui lòng chọn Project:", reply_markup=reply_markup)
+    
+    channel_id_str = os.getenv("TELEGRAM_CHANNEL_ID")
+    if channel_id_str and channel_id_str.lstrip("-").isdigit():
+        channel_id = int(channel_id_str)
+        user_sessions[channel_id] = {}
+        try:
+            await context.bot.send_message(
+                chat_id=channel_id,
+                text=f"👤 **{update.effective_user.full_name}** yêu cầu build.\nVui lòng chọn Project:",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+            if chat_id != channel_id:
+                await update.message.reply_text("✅ Đã gửi menu chọn project vào channel.")
+        except Exception as e:
+            logging.error(f"Cannot send to channel: {e}")
+            user_sessions[chat_id] = {}
+            await update.message.reply_text("Vui lòng chọn Project:", reply_markup=reply_markup)
+    else:
+        user_sessions[chat_id] = {}
+        await update.message.reply_text("Vui lòng chọn Project:", reply_markup=reply_markup)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -140,26 +191,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logging.error(f"Cannot send status: {e}")
 
+        # Hàm callback gửi tin nhắn kết quả cuối cùng
+        def send_final_result(text, file_path=None):
+            try:
+                import requests
+                
+                def _send(target_chat_id, target_text):
+                    if file_path and os.path.exists(file_path):
+                        url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
+                        with open(file_path, 'rb') as f:
+                            requests.post(url, data={"chat_id": target_chat_id, "caption": target_text, "parse_mode": "Markdown"}, files={"document": f})
+                    else:
+                        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+                        requests.post(url, json={"chat_id": target_chat_id, "text": target_text, "parse_mode": "Markdown"})
+
+                # Gửi cho chat hiện tại (nơi bấm menu)
+                _send(chat_id, text)
+                
+                # Gửi vào channel nếu chưa trùng
+                channel_id_str = os.getenv("TELEGRAM_CHANNEL_ID")
+                if channel_id_str and str(chat_id) != channel_id_str:
+                    channel_text = f"👤 **Yêu cầu bởi:** {update.effective_user.full_name}\n{text}"
+                    _send(channel_id_str, channel_text)
+                    
+            except Exception as e:
+                logging.error(f"Cannot send final result: {e}")
+
+        # Lấy BUILD_CMD
+        build_cmd_template = os.getenv("BUILD_CMD")
+
         # Khởi chạy luồng build
         start_build_thread(
             proj_config["path"],
-            proj_config["branch"],
+            proj_config["branches"],
             session["env"],
             session["platform"],
             flutter_bin,
             appbox_cli,
-            send_status
+            send_status,
+            send_final_result,
+            build_cmd_template
         )
+
+async def on_startup(app: Application):
+    channel_id_str = os.getenv("TELEGRAM_CHANNEL_ID")
+    if channel_id_str and channel_id_str.lstrip("-").isdigit():
+        channel_id = int(channel_id_str)
+        user_sessions[channel_id] = {}
+        
+        keyboard = []
+        for proj_name in PROJECTS.keys():
+            keyboard.append([InlineKeyboardButton(proj_name, callback_data=f"proj|{proj_name}")])
+            
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        try:
+            await app.bot.send_message(
+                chat_id=channel_id,
+                text="🚀 **Bot đã khởi động!**\nVui lòng chọn Project để build:",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+            logging.info("Đã gửi menu chọn project vào channel khi khởi động.")
+        except Exception as e:
+            logging.error(f"Cannot send startup menu to channel: {e}")
 
 if __name__ == '__main__':
     if not TOKEN:
         print("LỖI: Chưa cấu hình TELEGRAM_TOKEN trong file .env")
         exit(1)
         
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("build", build_command))
+    app.add_handler(CommandHandler("getid", getid_command))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     print("🚀 Flutter Builder Bot đang chạy...")

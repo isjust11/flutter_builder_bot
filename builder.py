@@ -159,19 +159,21 @@ def execute_build(project_path, branches, env_flavor, platform, flutter_bin, app
         elif platform == "ipa":
             build_output_path = os.path.join(project_path, "build", "ios", "ipa", f"{env_flavor}.ipa") # Thay đổi tùy app
         
-        # Kiểm tra nếu là file android thì ưu tiên gửi trực tiếp qua Telegram (giới hạn 50MB)
+        # Kiểm tra nếu là file android thì ưu tiên gửi trực tiếp qua Telegram (giới hạn 2000MB nếu dùng local bot API server)
         if platform in ["apk", "appbundle"]:
             file_size_mb = os.path.getsize(build_output_path) / (1024 * 1024) if os.path.exists(build_output_path) else 0
             
-            if 0 < file_size_mb <= 49.5:
+            if 0 < file_size_mb <= 1999.0:
                 status_callback(f"📤 File {platform.upper()} ({file_size_mb:.1f}MB) - Đang tải trực tiếp lên Telegram...")
                 msg = f"🎉 **Hoàn thành quá trình build {platform.upper()}!**\n⬇️ File cài đặt của bạn ở bên dưới:"
                 if final_callback: final_callback(msg, file_path=build_output_path)
                 else: status_callback(msg)
                 return
-            elif file_size_mb > 49.5:
-                status_callback(f"⚠️ File {platform.upper()} quá lớn ({file_size_mb:.1f}MB > 50MB giới hạn của Telegram). Sẽ chuyển sang upload lên Appbox...")
-        
+            elif file_size_mb > 1999.0:
+                msg = f"❌ File {platform.upper()} quá lớn ({file_size_mb:.1f}MB > 2000MB giới hạn của Telegram).\n\n⚠️ Lưu ý: Appbox không hỗ trợ upload file Android (.apk, .aab) nên không thể sử dụng Appbox làm phương án dự phòng. Quá trình dừng tại đây.\n\nFile build vẫn nằm ở: `{build_output_path}`"
+                if final_callback: final_callback(msg)
+                else: status_callback(msg)
+                return
         # 4. Upload lên Appbox
         status_callback(f"☁️ Đang upload file lên Appbox...")
         if not appbox_cli:

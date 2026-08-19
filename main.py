@@ -174,7 +174,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Chuẩn bị dữ liệu cho builder
         proj_config = PROJECTS[session["project"]]
         flutter_bin = FLUTTER_VERSIONS[session["version"]]
-        appbox_cli = os.getenv("APPBOX_CLI_PATH", "appbox")
+        appbox_cli = os.getenv("APPBOX_CLI_PATH", "").strip()
         
         # Hàm callback gửi tin nhắn về Telegram
         def send_status(text):
